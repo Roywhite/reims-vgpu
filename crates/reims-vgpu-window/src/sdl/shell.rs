@@ -196,8 +196,8 @@ pub(crate) fn close(id: u64) {
 
 /// Window `id`'s render thread let its surface go: SDL's window goes where the display has ended.
 #[cfg_attr(
-    not(target_os = "linux"),
-    expect(dead_code, reason = "only Linux's render thread holds SDL's window")
+    target_os = "macos",
+    expect(dead_code, reason = "AppKit holds the render surface on macOS")
 )]
 pub(crate) fn released(id: u64) {
     let gone = with_shell(id, |shell| {

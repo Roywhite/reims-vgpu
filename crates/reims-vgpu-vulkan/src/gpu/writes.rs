@@ -295,11 +295,11 @@ pub(crate) fn set_kept(flag: &AtomicBool, kept: bool) {
 
 /// One surface counted in [`KEPT_NOW`] while this lives: one whose GPU writes never reach its
 /// memory ([`surface_kept`]), which every object made on it holds.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[derive(Debug)]
 pub(crate) struct Keeping(());
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl Keeping {
     /// A count of one, from now on.
     pub(crate) fn new() -> Keeping {
@@ -308,7 +308,7 @@ impl Keeping {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl Drop for Keeping {
     fn drop(&mut self) {
         KEPT_NOW.fetch_sub(1, Ordering::SeqCst);

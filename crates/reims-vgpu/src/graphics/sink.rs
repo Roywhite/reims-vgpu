@@ -440,11 +440,8 @@ impl<P: ApiPlatform> ScanoutDraw<P> {
     ) -> Option<ScanoutDraw<P>> {
         let device = platform.metal_device(None)?;
         let queue = queue(&device)?;
-        // SAFETY: sysconf reads a constant of the host's.
-        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
-            .ok()
-            .filter(|p| p.is_power_of_two())
-            .unwrap_or(0x4000);
+        // Use the same host page size as the platform that imports the scanout.
+        let page = platform.vm().page_size();
         Some(ScanoutDraw {
             platform,
             device,

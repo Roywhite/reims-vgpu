@@ -308,3 +308,7 @@ mod tests {
         assert!(vm.deallocate(plain, LEN).is_success());
     }
 }
+
+/// Windows RAM file ownership and system queries.
+#[cfg(windows)]
+pub mod windows;

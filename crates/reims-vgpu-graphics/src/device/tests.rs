@@ -1011,6 +1011,7 @@ fn a_reset_keeps_the_scanout_and_what_the_guest_writes_there_shows() {
 
 /// The host's doorbell file wakes the control thread as a `DOORBELL` write does
 #[test]
+#[cfg(unix)]
 fn the_host_s_doorbell_file_wakes_the_device() {
     let mut rig = Rig::new();
     let bell = Wake::new().unwrap();

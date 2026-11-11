@@ -5,11 +5,11 @@
 //! pixel density of 1, and the content scale is the desktop's (`Xft.dpi` over 96, else GDK's
 //! scale). Wayland's modes have the output's scale as their density, with SDL's sizes in points.
 //!
-//! Linux sizes its windows here (`native/linux/sdl.rs`); macOS's SDL windows open in the frames
+//! The SDL Vulkan backend sizes its windows here. macOS's SDL windows open in the frames
 //! AppKit's window takes, in points.
 
 #![cfg_attr(
-    all(not(target_os = "linux"), not(test)),
+    all(target_os = "macos", not(test)),
     expect(dead_code, reason = "macOS's SDL windows open in AppKit's frames")
 )]
 

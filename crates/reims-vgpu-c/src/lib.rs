@@ -26,6 +26,7 @@ pub mod status;
 
 pub mod cursor;
 pub mod memory;
+mod memory_file;
 pub mod window;
 
 pub mod graphics;

@@ -15,6 +15,7 @@ mod hints;
 mod host_ram;
 mod import;
 mod plane_copy;
+#[path = "standin.rs"]
 mod surface;
 mod threads;
 mod vm;
@@ -28,7 +29,7 @@ pub use clock::LinuxClock;
 pub use device_lend::{LendRefusal, LentDmaBuf, dma_buf_of_host};
 pub use files::{GuestMemoryLease, lease_guest_memory};
 pub use plane_copy::{CopyError, DmaBufPlane, PlaneCopier, PlaneCopy, PlaneFormat};
-pub use surface::{LinuxSurface, LinuxSurfaces};
+pub use surface::{StandInSurface as LinuxSurface, StandInSurfaces as LinuxSurfaces};
 pub use threads::LinuxThreads;
 pub use vm::{LinuxVm, RegionMemory};
 
@@ -48,9 +49,9 @@ pub(crate) use import::{
 pub(crate) use surface::{
     own_alias, plane_at, plane_shape, recorded_mut, surface_memory_hold, ycbcr_matrix,
 };
-pub(crate) use vm::allocate_aliasable;
 #[cfg(test)]
 pub(crate) use vm::tests::{PAGE, mapped, writable};
+pub(crate) use vm::{OwnMemory, allocate_aliasable};
 
 /// The instance's surface extensions a display's window may present over, besides
 /// `VK_KHR_surface`, each asked for where the loader lists it (`crate::os`'s `wsi`): Wayland's,
@@ -148,4 +149,17 @@ pub fn default_gpu_core_count() -> Option<u64> {
 /// names: none, as there is no Metal here to ask.
 pub fn default_driver_sizes() -> [Option<u64>; 4] {
     [None; 4]
+}
+
+fn physical_memory() -> u64 {
+    // SAFETY: sysconf reads a system value.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    u64::try_from(pages)
+        .unwrap_or(0)
+        .saturating_mul(u64::try_from(page).unwrap_or(0))
 }

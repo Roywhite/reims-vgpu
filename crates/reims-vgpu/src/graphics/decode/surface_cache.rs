@@ -1538,7 +1538,9 @@ impl<P: Platform> SurfaceCaches<P> {
     /// their lock let go of.
     fn maker(&self) -> CacheMaker {
         CacheMaker {
+            #[cfg(unix)]
             exportable: self.exportable,
+            #[cfg(unix)]
             dma_buf: self.dma_buf,
         }
     }
@@ -2881,9 +2883,11 @@ pub(crate) struct Caches<P: Platform> {
 #[derive(Clone, Copy, Debug)]
 struct CacheMaker {
     /// Caches are made exportable, for the host's video to import ([`Caches::set_exportable`]).
+    #[cfg(unix)]
     exportable: bool,
     /// Laid-out caches of two planes are made with their memory a dma-buf
     /// ([`Caches::set_dma_buf`]).
+    #[cfg(unix)]
     dma_buf: bool,
 }
 
@@ -2912,6 +2916,7 @@ impl CacheMaker {
     ) -> RaiseResult<NewCache<P>> {
         let laid_out = layout.is_some();
         let mut counts = MakerCounts::default();
+        #[cfg(unix)]
         let life = || Some(MemoryLife::new());
         #[cfg(unix)]
         if self.exportable {

@@ -19,13 +19,20 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod surface;
+#[cfg(windows)]
+mod windows;
 mod wsi;
 
 #[cfg(target_os = "linux")]
 use linux as host_os;
 #[cfg(target_os = "macos")]
 use macos as host_os;
+#[cfg(windows)]
+use windows as host_os;
 
+#[cfg(windows)]
+use std::fs::File as OwnedFd;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 

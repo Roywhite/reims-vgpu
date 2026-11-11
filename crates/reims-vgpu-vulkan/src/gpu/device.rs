@@ -1209,6 +1209,7 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
     /// Metal's space gives it, as that buffer's. Any refusal (a device that exports no dma-buf of
     /// a buffer's memory, `RuntimeGap::DmaBufExport`, among them) answers `None`, logged at debug,
     /// and the caller makes the buffer as any other.
+    #[cfg(unix)]
     fn new_dma_buf_buffer_of_length_padding_unobserved(
         &self,
         _on: OnFault,
@@ -1225,6 +1226,7 @@ impl GpuDevice<VulkanPlatform> for VulkanDevice {
     /// places a new buffer's, as nothing of Metal's makes one. Any refusal (a device that exports
     /// no buffer's memory, `RuntimeGap::ExportableMemory`, among them) answers `None`, logged at
     /// debug, and the caller makes the buffer as any other.
+    #[cfg(unix)]
     fn new_exportable_buffer_of_length(
         &self,
         _on: OnFault,

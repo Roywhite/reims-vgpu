@@ -12,7 +12,7 @@
 //! **Out to the host.** Every call of a host function runs inside [`host_call`], the innermost
 //! frame around the function pointer: whatever the host throws ends the process at the call. The
 //! catch is the OS's ([`catch`]): objc2's `exception::catch` on macOS, std's `catch_unwind` on
-//! Linux. The host's function-pointer types stay `extern "C-unwind"`, since both are sound only
+//! Linux and Windows. The host's function-pointer types stay `extern "C-unwind"`, since both are sound only
 //! around an ABI that unwinds.
 
 use reims_vgpu_vulkan::core::raise::death::{DeathId, fatal};

@@ -150,6 +150,7 @@
 //! until the reset.
 
 use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -163,10 +164,13 @@ use crate::device::backlog::Backlog;
 use crate::device::gate::{Gate, Look, Offer};
 use crate::device::lanes::{Hand, Key, Lanes};
 use crate::display::{Mode, Scanout, Screen};
+use crate::keep::mono_ns as now_ns;
 use crate::ops::RgfxCommandBuffer;
 use crate::region::Region;
 use crate::ring::{Consumer, Message, Posted, Producer, RingAt, sized};
-use crate::wake::{self, Wake};
+#[cfg(unix)]
+use crate::wake;
+use crate::wake::Wake;
 use crate::wire::*;
 
 mod backlog;
@@ -656,6 +660,7 @@ pub(crate) struct Shared {
     /// The control thread's own wake.
     wake: Wake,
     /// The host's doorbell file for ring 0, once given.
+    #[cfg(unix)]
     doorbell: OnceLock<OwnedFd>,
     /// The control submission ring, held while the control thread takes a message.
     submit: Mutex<Submit>,
@@ -928,6 +933,7 @@ impl Device {
             reset_owed: AtomicBool::new(false),
             ending: AtomicBool::new(false),
             wake: Wake::new()?,
+            #[cfg(unix)]
             doorbell: OnceLock::new(),
             submit: Mutex::new(Submit {
                 consumer,
@@ -995,7 +1001,7 @@ impl Device {
     /// stays as it is until the guest acts.
     #[cfg(test)]
     pub(crate) fn parked(&self) -> bool {
-        let doorbell = self.shared.doorbell.get().map(AsRawFd::as_raw_fd);
+        let doorbell = self.shared.doorbell_fd();
         self.shared.wake.parked(doorbell)
             && self.shared.lanes.idle()
             && self
@@ -1081,6 +1087,7 @@ impl Device {
     /// Takes a copy of `fd`, the host's doorbell file for ring 0 (its `ioeventfd`'s, readable
     /// once the guest writes 0 to `DOORBELL`), which the control thread then sleeps on too.
     /// False where `fd` is not open, or the device has one already.
+    #[cfg(unix)]
     pub fn set_doorbell(&self, fd: RawFd) -> bool {
         let Some(copy) = wake::duplicate(fd) else {
             return false;
@@ -1313,6 +1320,19 @@ enum Post {
 }
 
 impl Shared {
+    /// Unix supplies a pollable external file. Windows' transport rings MMIO,
+    /// which wakes the same control consumer through its native condition variable.
+    fn doorbell_fd(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            self.doorbell.get().map(AsRawFd::as_raw_fd)
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
+    }
+
     /// The device's end: every thread stops at its next wake.
     fn end(&self) {
         self.ending.store(true, Ordering::Release);
@@ -1476,7 +1496,7 @@ impl Shared {
             if self.ending() {
                 break;
             }
-            self.wake.sleep(self.doorbell.get().map(AsRawFd::as_raw_fd));
+            self.wake.sleep(self.doorbell_fd());
             // A doorbell may follow the guest's take of completions.
             self.room.wake();
             // A reset while it slept set the ring up anew, its `consumer_idle` 1, so the guest
@@ -2875,19 +2895,6 @@ fn event_header(r#type: u32) -> RgfxMsgHeader {
 /// A `SUBMIT_ROOM` record: its header alone, `seqno` 0.
 fn submit_room() -> Vec<u8> {
     sized(&event_header(RGFX_EVT_SUBMIT_ROOM))
-}
-
-/// The host's monotonic clock, in nanoseconds.
-fn now_ns() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `clock_gettime` writes the timespec.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
-    let nanos = u64::try_from(ts.tv_nsec).unwrap_or(0);
-    secs.saturating_mul(1_000_000_000).saturating_add(nanos)
 }
 
 #[cfg(test)]

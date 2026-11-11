@@ -40,6 +40,7 @@ impl ApiPlatform for VulkanPlatform {
     /// makes of a userptr import; a device that takes the pointer imports it as before. Where the
     /// host gives no such mapping, and on macOS, private memory
     /// (`reims_vgpu_vulkan::os::PrivateMemory`), which every GPU imports by its pointer.
+    #[cfg(unix)]
     fn graphics_region(&self, len: usize) -> Option<reims_vgpu_graphics::region::Region> {
         let length = u64::try_from(len).ok()?;
         if let Some(memory) = reims_vgpu_vulkan::os::RegionMemory::new(length) {
@@ -56,6 +57,13 @@ impl ApiPlatform for VulkanPlatform {
         // SAFETY: as above: the memory's own fresh zeros, read and write, from its page-aligned
         // first byte, deallocated only as it drops.
         unsafe { reims_vgpu_graphics::region::Region::over(base, len, Box::new(memory)) }
+    }
+
+    /// Windows imports the sparse BAR mapping by address. Keeping its owner in the region
+    /// avoids a 1 GiB pagefile commit when the device is created.
+    #[cfg(windows)]
+    fn graphics_region(&self, len: usize) -> Option<reims_vgpu_graphics::region::Region> {
+        reims_vgpu_graphics::region::Region::new(len)
     }
 
     /// The whole texture, through the runtime's `get_bytes`

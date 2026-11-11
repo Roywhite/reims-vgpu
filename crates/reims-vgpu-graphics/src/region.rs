@@ -6,8 +6,9 @@
 //! its pages: on Linux a shared mapping of a memfd of the library's, which every GPU imports,
 //! RADV through dma-bufs of its pages, and on macOS, or where the host gives no memfd, private
 //! memory of the library's), else private anonymous memory (`mmap` with
-//! `MAP_PRIVATE | MAP_ANONYMOUS`, [`Region::new`]), which its drop unmaps. Either is handed out
-//! zeroed and commits a page only when something first touches it, so a page neither the guest
+//! `MAP_PRIVATE | MAP_ANONYMOUS` on Unix or a private sparse backing file on Windows,
+//! [`Region::new`]), which its drop unmaps. Either is handed out
+//! zeroed and brings a page into memory only when something first touches it, so a page neither the guest
 //! nor the host has used costs no host memory; a GPU import that pins the region commits what it
 //! pins. The host maps it into the guest once, at the device's start, and it stays mapped, at the
 //! same address, until the device's end.
@@ -29,6 +30,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
+
+#[cfg(unix)]
+#[path = "region/unix.rs"]
+mod native;
+#[cfg(windows)]
+#[path = "region/windows.rs"]
+mod native;
 
 use crate::wire::{RgfxSurfaceWriter, RgfxSurfaceWriters};
 
@@ -72,26 +80,14 @@ impl std::fmt::Debug for Region {
 }
 
 impl Region {
-    /// `len` bytes of private anonymous memory, which read as zero and are committed as they are
+    /// `len` bytes of private memory, which read as zero and become resident as they are
     /// first touched. `None` where the host refuses the mapping, or `len` is 0.
     pub fn new(len: usize) -> Option<Region> {
         if len == 0 {
             return None;
         }
         // SAFETY: a fresh anonymous mapping, at an address the kernel picks.
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return None;
-        }
+        let base = native::map(len)?;
         Some(Region {
             base: base.cast::<u8>(),
             len,
@@ -440,7 +436,7 @@ impl Drop for Region {
             Some(memory) => drop(memory),
             // SAFETY: the mapping `new` made, which nothing reaches after this.
             None => unsafe {
-                libc::munmap(self.base.cast(), self.len);
+                native::free(self.base, self.len);
             },
         }
     }
@@ -493,23 +489,13 @@ mod tests {
         impl Drop for Holder {
             fn drop(&mut self) {
                 // SAFETY: the test's own mapping, which nothing reaches after the region drops.
-                unsafe { libc::munmap(std::ptr::with_exposed_provenance_mut(self.at), self.len) };
+                unsafe { native::free(std::ptr::with_exposed_provenance_mut(self.at), self.len) };
                 self.freed.store(true, Ordering::Relaxed);
             }
         }
         let len = 64 * 1024;
         // SAFETY: a fresh anonymous mapping, at an address the kernel picks.
-        let at = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(at, libc::MAP_FAILED);
+        let at = native::map(len).unwrap();
         let freed = Arc::new(AtomicBool::new(false));
         let holder = Holder {
             at: at.expose_provenance(),
@@ -646,6 +632,7 @@ mod tests {
 
     /// The process's peak resident size in bytes: `ru_maxrss` is in bytes on macOS and in KiB
     /// on Linux.
+    #[cfg(unix)]
     fn peak_resident() -> u64 {
         // SAFETY: getrusage writes the struct it is given.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -656,6 +643,11 @@ mod tests {
         } else {
             maxrss * 1024
         }
+    }
+
+    #[cfg(windows)]
+    fn peak_resident() -> u64 {
+        native::peak_resident_bytes()
     }
 
     /// A region costs host memory only for the pages that are touched: making a 1 GiB one does

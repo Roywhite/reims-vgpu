@@ -20,6 +20,8 @@ use crate::ffi;
 use crate::handle;
 use crate::memory::{RvgMemoryMap, RvgMemoryRangeFile, memory_map};
 use crate::sized::{self, HostStruct};
+#[cfg(windows)]
+use crate::status::RVG_ERR_UNSUPPORTED;
 use crate::status::{RVG_ERR_INVALID_ARGUMENT, RVG_OK, RvgStatus, status};
 use crate::table::{RvgDestroyFn, Table, WithTable};
 use crate::window::{RvgWindowConfig, window_callbacks};
@@ -430,6 +432,7 @@ pub unsafe extern "C" fn rvg_graphics_device_mmio_write_taking(
 /// the EventNotifier of memory_region_add_eventfd, an eventfd, or a pipe where the host has
 /// none). The device takes a copy of it, and reads what it holds when it wakes; the host may
 /// close its own. RVG_ERR_INVALID_ARGUMENT where `fd` is not open or the device has one already.
+/// Windows returns RVG_ERR_UNSUPPORTED; its host delivers doorbells through MMIO.
 /// Calls back: never.
 ///
 /// # Safety
@@ -442,10 +445,20 @@ pub unsafe extern "C" fn rvg_graphics_device_set_doorbell(
     ffi::export(|| {
         // SAFETY: the caller's contract.
         let d = unsafe { live(device, "rvg_graphics_device_set_doorbell") };
-        if d.device.set_doorbell(fd) {
-            RVG_OK
-        } else {
-            RVG_ERR_INVALID_ARGUMENT
+        #[cfg(unix)]
+        {
+            if d.device.set_doorbell(fd) {
+                RVG_OK
+            } else {
+                RVG_ERR_INVALID_ARGUMENT
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = (d, fd);
+            // A Windows HANDLE cannot be passed as this Unix descriptor.
+            // Windows hosts deliver control-ring doorbells through MMIO.
+            RVG_ERR_UNSUPPORTED
         }
     })
 }

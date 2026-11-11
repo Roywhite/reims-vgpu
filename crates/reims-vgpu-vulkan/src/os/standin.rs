@@ -1,7 +1,7 @@
 //! IOSurface's stand-in on Linux: what `IOSurfaceCreate` and `[[IOSurface alloc]
 //! initWithProperties:]` answer on macOS, over memory a view can be made of.
 //!
-//! - **References.** A [`LinuxSurface`] is one reference: `clone_ref` is a retain, `Drop` a
+//! - **References.** A [`StandInSurface`] is one reference: `clone_ref` is a retain, `Drop` a
 //!   release, and the retain count, which the guest sees, is the number of references to the
 //!   object. Its ID is the object's address, unique among live surfaces. A lookup
 //!   (`lookup_by_port`) is another object over the same memory, with a count of its own, as
@@ -10,7 +10,7 @@
 //!   backing table ([`super::vm::OwnMemory`]), so a view can be made of it (an alias of its
 //!   allocation, a buffer over it) and no `deallocate` frees it. One over the guest's pages
 //!   (`kIOSurfaceClientAddressRanges`) of one range is that range, its base address its offset
-//!   into it; one of several ranges is a view of them ([`super::vm::LinuxVm`]), read-only for
+//!   into it; one of several ranges is a view of them ([`super::vm::OsVm`]), read-only for
 //!   the CPU where it is read-only for the GPU (`kIOSurfaceClientDirection` 2), as IOSurface maps
 //!   it on macOS. The view runs on past the allocation's whole pages by the zeros a buffer over
 //!   the surface at its offset reads past its end, so that the surface's buffers lie over the
@@ -71,7 +71,7 @@ use crate::core::platform::os::vm::{HostVm as _, KernReturn, VmProt};
 use crate::core::platform::{Handle, ObjId};
 use crate::core::sync::Mutex;
 
-use super::vm::{LinuxVm, OwnMemory, allocate_aliasable};
+use super::{OsVm, OwnMemory, allocate_aliasable, physical_memory};
 use crate::gpu::backing::Alias;
 use crate::os::{MadeOver, READ_ONLY_DIRECTION, page_runs};
 use crate::platform::VulkanPlatform;
@@ -88,7 +88,7 @@ const BACKING_ROW_ALIGNMENT: u64 = 128;
 
 /// One reference to an IOSurface stand-in (module docs): `Drop` is the release.
 #[derive(Debug)]
-pub struct LinuxSurface(ManuallyDrop<Arc<Object>>);
+pub struct StandInSurface(ManuallyDrop<Arc<Object>>);
 
 /// An object over a surface: the one made, or a lookup of it.
 #[derive(Debug)]
@@ -142,7 +142,7 @@ impl Drop for Memory {
     /// Frees the view the surface made, and its own memory.
     fn drop(&mut self) {
         if let Some((first, length)) = self.view {
-            let _ = LinuxVm::new().deallocate(HostPtr::from_addr(first.to_usize()), length);
+            let _ = OsVm::new().deallocate(HostPtr::from_addr(first.to_usize()), length);
         }
         drop(self.own.take());
     }
@@ -153,7 +153,7 @@ impl Drop for Memory {
 /// pages, which maps nothing, an unmap hold on that range, its allocation's bytes from the
 /// range's first, before the base address by the surface's offset, which defers nothing for a
 /// range of the host's own RAM, the only one core makes such a surface over (module docs).
-pub(crate) fn surface_memory_hold(surface: &LinuxSurface) -> impl Send + 'static {
+pub(crate) fn surface_memory_hold(surface: &StandInSurface) -> impl Send + 'static {
     MemoryHolder::of(surface).hold()
 }
 
@@ -175,7 +175,7 @@ unsafe impl Sync for MemoryHolder {}
 
 impl MemoryHolder {
     /// The holder of `surface`'s memory.
-    pub(crate) fn of(surface: &LinuxSurface) -> MemoryHolder {
+    pub(crate) fn of(surface: &StandInSurface) -> MemoryHolder {
         let data = surface.data();
         let memory = &data.memory;
         let range = (memory.own.is_none() && memory.view.is_none())
@@ -202,10 +202,10 @@ impl MemoryHolder {
     }
 }
 
-impl LinuxSurface {
+impl StandInSurface {
     /// A new surface: one reference to a new object over `data`.
-    fn new(data: Data) -> LinuxSurface {
-        LinuxSurface(ManuallyDrop::new(Arc::new(Object(Arc::new(data)))))
+    fn new(data: Data) -> StandInSurface {
+        StandInSurface(ManuallyDrop::new(Arc::new(Object(Arc::new(data)))))
     }
 
     /// The surface the object is over.
@@ -214,7 +214,7 @@ impl LinuxSurface {
     }
 }
 
-impl Drop for LinuxSurface {
+impl Drop for StandInSurface {
     /// The release.
     fn drop(&mut self) {
         // SAFETY: the reference is released once, here, and never touched after.
@@ -222,9 +222,9 @@ impl Drop for LinuxSurface {
     }
 }
 
-impl Handle for LinuxSurface {
+impl Handle for StandInSurface {
     fn clone_ref(&self) -> Self {
-        LinuxSurface(ManuallyDrop::new(Arc::clone(&self.0)))
+        StandInSurface(ManuallyDrop::new(Arc::clone(&self.0)))
     }
 
     fn id(&self) -> ObjId {
@@ -232,7 +232,7 @@ impl Handle for LinuxSurface {
     }
 }
 
-impl Surface for LinuxSurface {
+impl Surface for StandInSurface {
     fn retain_count(&self) -> i64 {
         i64::try_from(Arc::strong_count(&self.0)).unwrap_or(i64::MAX)
     }
@@ -288,7 +288,7 @@ impl Surface for LinuxSurface {
     }
 
     fn lookup_by_port(&self) -> Option<Self> {
-        Some(LinuxSurface(ManuallyDrop::new(Arc::new(Object(
+        Some(StandInSurface(ManuallyDrop::new(Arc::new(Object(
             Arc::clone(&self.0.0),
         )))))
     }
@@ -296,14 +296,14 @@ impl Surface for LinuxSurface {
 
 /// Plane `plane` of `surface`: its offset from the base address and its bytes per row, as the
 /// spec gave them; `None` for a plane the surface lacks.
-pub(crate) fn plane_at(surface: &LinuxSurface, plane: u64) -> Option<(u64, u64)> {
+pub(crate) fn plane_at(surface: &StandInSurface, plane: u64) -> Option<(u64, u64)> {
     let p = surface.data().planes.get(usize::try_from(plane).ok()?)?;
     Some((p.offset, p.bytes_per_row))
 }
 
 /// The width, height and bytes per element of plane `plane` of `surface`; `None` for a plane it
 /// lacks.
-pub(crate) fn plane_shape(surface: &LinuxSurface, plane: u64) -> Option<(u64, u64, u64)> {
+pub(crate) fn plane_shape(surface: &StandInSurface, plane: u64) -> Option<(u64, u64, u64)> {
     let p = surface.data().planes.get(usize::try_from(plane).ok()?)?;
     Some((p.width, p.height, p.bytes_per_element))
 }
@@ -311,14 +311,14 @@ pub(crate) fn plane_shape(surface: &LinuxSurface, plane: u64) -> Option<(u64, u6
 /// The YCbCr matrix `surface` names (`kIOSurfaceYCbCrMatrix`): none, as the stand-in holds no
 /// values and nothing sets one.
 pub(crate) fn ycbcr_matrix(
-    _surface: &LinuxSurface,
+    _surface: &StandInSurface,
 ) -> Option<metal2vulkan_runtime::SurfaceYCbCrMatrix> {
     None
 }
 
 /// What `surface` was made over, `change` given it: every stand-in holds its own record.
 pub(crate) fn recorded_mut<T>(
-    surface: &LinuxSurface,
+    surface: &StandInSurface,
     change: impl FnOnce(&mut MadeOver) -> T,
 ) -> Option<T> {
     Some(change(&mut surface.data().made.lock()))
@@ -354,24 +354,9 @@ fn extent(
     (rows - 1).checked_mul(bytes_per_row)?.checked_add(row)
 }
 
-/// The host's usable memory, in bytes, as Linux counts it (`MemTotal`): the largest allocation
-/// the stand-in makes, as macOS's IOSurface makes none past `hw.memsize_usable` (module docs).
-fn physical_memory() -> u64 {
-    // SAFETY: sysconf reads a system value.
-    let (pages, page) = unsafe {
-        (
-            libc::sysconf(libc::_SC_PHYS_PAGES),
-            libc::sysconf(libc::_SC_PAGESIZE),
-        )
-    };
-    u64::try_from(pages)
-        .unwrap_or(0)
-        .saturating_mul(u64::try_from(page).unwrap_or(0))
-}
-
 /// The host's page size.
 fn page_size() -> u64 {
-    LinuxVm::new().page_size()
+    OsVm::new().page_size()
 }
 
 /// The planes of `spec`, checked against its allocation (module docs); `None` where IOSurface
@@ -454,7 +439,7 @@ fn checked_ranges(ranges: &[PhysicalMemoryRange], alloc_size: u64) -> Option<()>
 /// udmabuf makes of files alone; a read-only view's map the block of zeros, whose twin, which the
 /// runtime imports, is zeros of its own (`super::import`).
 fn view(runs: &[std::ops::Range<u64>], length: u64, zeros: u64, read_only: bool) -> Option<u64> {
-    let vm = LinuxVm::new();
+    let vm = OsVm::new();
     let whole = length.checked_add(zeros)?;
     let at = if zeros > 0 && !read_only {
         allocate_aliasable(whole)
@@ -470,7 +455,7 @@ fn view(runs: &[std::ops::Range<u64>], length: u64, zeros: u64, read_only: bool)
         let _ = vm.deallocate(at, whole);
         None
     };
-    // The runs as far as the allocation's length reaches, viewed at once (`LinuxVm`'s
+    // The runs as far as the allocation's length reaches, viewed at once (`OsVm`'s
     // `remap_runs_shared_overwrite`: through dma-bufs of the pages where the host makes them).
     let mut offset = 0u64;
     let mut sources = Vec::with_capacity(runs.len());
@@ -510,7 +495,7 @@ fn view(runs: &[std::ops::Range<u64>], length: u64, zeros: u64, read_only: bool)
 /// (`crate::gpu::backing::gather`), and stays mapped while the alias holds the surface's memory
 /// ([`surface_memory_hold`]). `None` for a surface with no view: its own memory, one range of the
 /// guest's pages, or none.
-pub(crate) fn own_alias(surface: &LinuxSurface) -> Option<Alias> {
+pub(crate) fn own_alias(surface: &StandInSurface) -> Option<Alias> {
     let memory = &surface.data().memory;
     let (first, length) = memory.view?;
     let at = NonNull::new(std::ptr::with_exposed_provenance_mut::<u8>(
@@ -521,17 +506,17 @@ pub(crate) fn own_alias(surface: &LinuxSurface) -> Option<Alias> {
 
 /// IOSurface's creation on Linux (module docs).
 #[derive(Debug, Default)]
-pub struct LinuxSurfaces;
+pub struct StandInSurfaces;
 
-impl LinuxSurfaces {
+impl StandInSurfaces {
     /// The process's IoSurfaces.
-    pub fn new() -> LinuxSurfaces {
-        LinuxSurfaces
+    pub fn new() -> StandInSurfaces {
+        StandInSurfaces
     }
 }
 
-impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
-    fn create(&self, spec: &SurfaceSpec) -> Option<LinuxSurface> {
+impl IoSurfaces<VulkanPlatform> for StandInSurfaces {
+    fn create(&self, spec: &SurfaceSpec) -> Option<StandInSurface> {
         if !matches!(
             spec.client_direction,
             None | Some(READ_ONLY_DIRECTION | WRITABLE_DIRECTION)
@@ -588,7 +573,7 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
             }
         };
         let kept = made.gpu_read_only.then(crate::gpu::writes::Keeping::new);
-        Some(LinuxSurface::new(Data {
+        Some(StandInSurface::new(Data {
             pixel_format: spec.pixel_format,
             width: spec.width,
             height: spec.height,
@@ -607,7 +592,7 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
         }))
     }
 
-    fn create_backing(&self, spec: &BackingSurfaceSpec) -> Option<LinuxSurface> {
+    fn create_backing(&self, spec: &BackingSurfaceSpec) -> Option<StandInSurface> {
         let (width, height) = (u64::from(spec.width), u64::from(spec.height));
         if width == 0 || height == 0 {
             return None;
@@ -634,7 +619,7 @@ impl IoSurfaces<VulkanPlatform> for LinuxSurfaces {
             return None;
         }
         let own = OwnMemory::new(alloc_size)?;
-        Some(LinuxSurface::new(Data {
+        Some(StandInSurface::new(Data {
             pixel_format: spec.pixel_format,
             width,
             height,
@@ -707,7 +692,7 @@ mod tests {
 
     /// The range `s` mapped, its first byte and length: its own memory's whole pages, or its
     /// view.
-    fn mapped_range(s: &LinuxSurface) -> Option<(u64, u64)> {
+    fn mapped_range(s: &StandInSurface) -> Option<(u64, u64)> {
         let data = s.data();
         let own = data.memory.own.as_ref().map(|own| {
             let length = data.alloc_size.next_multiple_of(page_size());
@@ -717,7 +702,7 @@ mod tests {
     }
 
     fn free(at: u64, length: u64) {
-        let vm = LinuxVm::new();
+        let vm = OsVm::new();
         assert!(
             vm.deallocate(HostPtr::from_addr(at.to_usize()), length)
                 .is_success()
@@ -733,7 +718,7 @@ mod tests {
     /// freed with its last object
     #[test]
     fn a_surface_answers_its_spec_and_counts_its_references() {
-        let s = LinuxSurfaces::new().create(&host_only()).unwrap();
+        let s = StandInSurfaces::new().create(&host_only()).unwrap();
         assert_eq!(s.retain_count(), 1);
         assert_eq!((s.pixel_format(), s.width(), s.height()), (BGRA, 16, 16));
         assert_eq!((s.bytes_per_element(), s.bytes_per_row()), (4, 64));
@@ -755,7 +740,7 @@ mod tests {
     /// memory outlives the object made while the lookup lives
     #[test]
     fn a_lookup_is_another_object() {
-        let s = LinuxSurfaces::new().create(&host_only()).unwrap();
+        let s = StandInSurfaces::new().create(&host_only()).unwrap();
         let t = s.lookup_by_port().unwrap();
         assert_ne!(s.id(), t.id());
         let held = t.clone_ref();
@@ -784,7 +769,7 @@ mod tests {
             ..host_only()
         };
         for spec in [host_only(), several] {
-            let s = LinuxSurfaces::new().create(&spec).unwrap();
+            let s = StandInSurfaces::new().create(&spec).unwrap();
             let base = s.base_address();
             let hold = surface_memory_hold(&s);
             assert_eq!(s.retain_count(), 1);
@@ -799,7 +784,7 @@ mod tests {
     /// The layouts IOSurface refuses are refused (module docs), and those at its limits made
     #[test]
     fn refused_layouts_are_none() {
-        let surfaces = LinuxSurfaces::new();
+        let surfaces = StandInSurfaces::new();
         let refused = [
             SurfaceSpec {
                 width: u64::MAX,
@@ -882,7 +867,7 @@ mod tests {
             alloc_size: 2048,
             ..host_only()
         };
-        let s = LinuxSurfaces::new().create(&spec).unwrap();
+        let s = StandInSurfaces::new().create(&spec).unwrap();
         let first = mapped_range(&s).unwrap().0;
         assert_eq!(s.base_address().addr().to_u64(), first + 0x40);
         assert_eq!(recorded_mut(&s, |made| made.offset).unwrap(), 0x40);
@@ -913,7 +898,7 @@ mod tests {
             bytes_per_row: 16,
             ..host_only()
         };
-        let surfaces = LinuxSurfaces::new();
+        let surfaces = StandInSurfaces::new();
         let s = surfaces.create(&two(0x101, 16, 0x1000)).unwrap();
         assert_eq!(s.plane_count(), 2);
         assert_eq!(plane_at(&s, 1), Some((0x101, 16)));
@@ -937,7 +922,7 @@ mod tests {
             protection_options: 4,
             ..host_only()
         };
-        let s = LinuxSurfaces::new().create(&spec).unwrap();
+        let s = StandInSurfaces::new().create(&spec).unwrap();
         assert_eq!(s.protection_options(), 7);
         assert!(s.base_address().is_null());
     }
@@ -950,7 +935,7 @@ mod tests {
         use crate::gpu::writes::any_kept;
         let page = page_size();
         let (_, ranges) = guest_pages(2);
-        let surfaces = LinuxSurfaces::new();
+        let surfaces = StandInSurfaces::new();
         let over = |direction| SurfaceSpec {
             alloc_size: 2 * page,
             client_direction: direction,
@@ -972,10 +957,11 @@ mod tests {
     /// A surface over one range of the guest's pages is that range, at its offset; one over
     /// several is a view of them, read-only where the GPU's writes never reach them
     #[test]
+    #[cfg(target_os = "linux")]
     fn surfaces_over_the_guests_pages() {
         let page = page_size();
         let (at, ranges) = guest_pages(4);
-        let surfaces = LinuxSurfaces::new();
+        let surfaces = StandInSurfaces::new();
         let over = |ranges: &[PhysicalMemoryRange], alloc_size, offset, direction| SurfaceSpec {
             alloc_size,
             offset,
@@ -1051,7 +1037,7 @@ mod tests {
             client_address_ranges: Some(ranges[1..2].to_vec()),
             ..host_only()
         };
-        let one = LinuxSurfaces::new().create(&spec).unwrap();
+        let one = StandInSurfaces::new().create(&spec).unwrap();
         let ptr = |first: u64| HostPtr::from_addr(first.to_usize());
         let hold = surface_memory_hold(&one);
         let vm = crate::remap::VulkanVm::new();
@@ -1082,6 +1068,7 @@ mod tests {
     /// view mapped past the surface's last reference, and frees nothing of its own. A surface of
     /// one range, or of its own memory, has no view to lend
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_surface_lends_its_view_as_its_buffers_alias() {
         use super::super::vm::tests::writable;
         use crate::core::platform::os::vm::HostAddr;
@@ -1089,7 +1076,7 @@ mod tests {
         let page = page_size();
         let (at, ranges) = guest_pages(3);
         let backwards: Vec<_> = ranges.iter().rev().copied().collect();
-        let surfaces = LinuxSurfaces::new();
+        let surfaces = StandInSurfaces::new();
         let over = |ranges: &[PhysicalMemoryRange], alloc_size, direction| SurfaceSpec {
             alloc_size,
             offset: 0x40,
@@ -1134,6 +1121,7 @@ mod tests {
     /// in the host's memory with one remap, in their order: one for pages in order, one each out
     /// of order
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_surface_views_each_run_of_following_pages_at_once() {
         let page = page_size();
         let (at, ranges) = guest_pages(4);
@@ -1145,7 +1133,7 @@ mod tests {
                 client_address_ranges: Some(pages.clone()),
                 ..host_only()
             };
-            let s = LinuxSurfaces::new().create(&spec).unwrap();
+            let s = StandInSurfaces::new().create(&spec).unwrap();
             let (view, length) = mapped_range(&s).unwrap();
             assert_eq!(super::super::files::runs_between(view, view + length), runs);
             assert_eq!(read(view + page), second);
@@ -1156,8 +1144,9 @@ mod tests {
 
     /// A surface over pages no file is behind is refused, nothing left mapped
     #[test]
+    #[cfg(target_os = "linux")]
     fn pages_without_a_file_are_refused() {
-        let vm = LinuxVm::new();
+        let vm = OsVm::new();
         let page = page_size();
         let at = vm.allocate_anywhere(2 * page).unwrap().addr().to_u64();
         let ranges: Vec<_> = (0..2)
@@ -1171,7 +1160,7 @@ mod tests {
             client_address_ranges: Some(ranges),
             ..host_only()
         };
-        assert!(LinuxSurfaces::new().create(&spec).is_none());
+        assert!(StandInSurfaces::new().create(&spec).is_none());
         free(at, 2 * page);
     }
 
@@ -1202,7 +1191,7 @@ mod tests {
             width: 17,
             height: 16,
         };
-        let surfaces = LinuxSurfaces::new();
+        let surfaces = StandInSurfaces::new();
         let s = surfaces.create_backing(&spec).unwrap();
         let end = 0x5000 + 7 * 16 + 16;
         assert_eq!(s.alloc_size(), u64::next_multiple_of(end, page_size()));

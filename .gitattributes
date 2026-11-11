@@ -1,0 +1,6 @@
+# The metallib manifest fingerprints shader source bytes.
+*.metal text eol=lf
+/crates/reims-vgpu-vulkan/src/gpu/stitch.m text eol=lf
+
+# Wire tests compare these recorded transcripts byte for byte.
+*.trace text eol=lf

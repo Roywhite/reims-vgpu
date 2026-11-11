@@ -3,6 +3,9 @@
 //! range where the host names one, and the platform's lease on it ([`GuestMemoryLease`]).
 
 use std::any::Any;
+#[cfg(windows)]
+use std::fs::File as OwnedFd;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 

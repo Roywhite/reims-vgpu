@@ -508,6 +508,7 @@ void rvg_graphics_device_mmio_write_taking(RvgGraphicsDevice *device,
 // the EventNotifier of memory_region_add_eventfd, an eventfd, or a pipe where the host has
 // none). The device takes a copy of it, and reads what it holds when it wakes; the host may
 // close its own. RVG_ERR_INVALID_ARGUMENT where `fd` is not open or the device has one already.
+// Windows returns RVG_ERR_UNSUPPORTED; its host delivers doorbells through MMIO.
 // Calls back: never.
 //
 // # Safety

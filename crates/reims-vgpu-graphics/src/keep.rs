@@ -101,7 +101,8 @@ impl TestClock {
 }
 
 /// The host's monotonic clock, in nanoseconds.
-fn mono_ns() -> u64 {
+#[cfg(unix)]
+pub(crate) fn mono_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -111,6 +112,18 @@ fn mono_ns() -> u64 {
     let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
     let nanos = u64::try_from(ts.tv_nsec).unwrap_or(0);
     secs.saturating_mul(1_000_000_000).saturating_add(nanos)
+}
+
+/// Shares one monotonic epoch across the device and its deadline checks.
+#[cfg(windows)]
+pub(crate) fn mono_ns() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let nanos = EPOCH.get_or_init(Instant::now).elapsed().as_nanos();
+    // Some queues reserve zero for timestamps that have not been recorded.
+    u64::try_from(nanos).unwrap_or(u64::MAX).saturating_add(1)
 }
 
 #[cfg(test)]

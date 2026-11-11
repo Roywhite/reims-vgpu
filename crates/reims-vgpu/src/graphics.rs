@@ -37,6 +37,7 @@
 
 use std::borrow::Cow;
 use std::marker::PhantomData;
+#[cfg(unix)]
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -600,6 +601,7 @@ impl<P: ApiPlatform> GraphicsDevice<P> {
 
     /// Takes a copy of `fd`, the host's `ioeventfd` for `DOORBELL` with ring 0. False where `fd`
     /// is not open or the device has one already.
+    #[cfg(unix)]
     pub fn set_doorbell(&self, fd: RawFd) -> bool {
         entry::run(|_| self.device.set_doorbell(fd))
     }
